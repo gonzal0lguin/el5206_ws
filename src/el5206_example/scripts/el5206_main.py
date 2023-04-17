@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 This is the main script used for the EL5206 Robotics component. This script is
 written Python 3 and defines a EL5206_Robot node for you to program. You will
@@ -18,10 +18,13 @@ import tf
 import tf2_ros
 import time
 import yaml
+import os
 
 from geometry_msgs.msg import Twist, Pose2D
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
+
+from math import atan2, sqrt
 
 class EL5206_Robot:
     def __init__(self):
@@ -32,22 +35,24 @@ class EL5206_Robot:
         self.robot_frame_id = 'base_footprint'
         self.odom_frame_id  = 'odom'
         self.currentScan =  None
-        self.odom_x   = None
-        self.odom_y   = None
-        self.odom_yaw = None
-        self.gt_x     = None
-        self.gt_y     = None
-        self.gt_yaw   = None
+        self.odom_x   = 0.0
+        self.odom_y   = 0.0
+        self.odom_yaw = 0.0
+        self.gt_x     = 0.0
+        self.gt_y     = 0.0
+        self.gt_yaw   = 0.0
         self.odom_lst = []
         self.gt_lst   = []
         self.poses_to_save = 300 
-        self.target_x   = None
-        self.target_y   = None
-        self.target_yaw = None
+        self.target_x   = 0.0
+        self.target_y   = 0.0
+        self.target_yaw = 0.0
+        self.K_p = 0.2
         self.path = rospkg.RosPack().get_path('el5206_example')
-
+        #os.path.join(os.path.dirname(os.path.abspath(__file__)), '../..')
         # Extra variable to print odometry
         self.odom_i = 0
+        self.target_reached = False
 
         # Subscribers
         rospy.Subscriber("/odom",               Odometry,  self.odometryCallback)
@@ -56,7 +61,7 @@ class EL5206_Robot:
         rospy.Subscriber("/target_pose",        Pose2D,    self.poseCallback)
 
         # Publishers
-        self.vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+        self.vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
 
         # Timer
         self.update_timer = rospy.Timer( rospy.Duration(1.0), self.timerCallback )
@@ -86,10 +91,10 @@ class EL5206_Robot:
         self.odom_y and self.odom_yaw attributes.
         """
         self.odom_i += 1
-        if self.odom_i%30==0:
+        #if self.odom_i%30==0:
             # Print one every 30 msgs
-            print("This is the Odometry message:")
-            print(msg)
+            #print("This is the Odometry message:")
+            #print(msg)
         self.odom_x, self.odom_y, self.odom_yaw = self.odom2Coords(msg)
     
 
@@ -114,9 +119,10 @@ class EL5206_Robot:
         $ rostopic pub /target_pose geometry_msgs/Pose2D '1.0' '2.0' '3.0'
         """
         # START: YOUR CODE HERE
-        self.target_x   = 0
-        self.target_y   = 0
-        self.target_yaw = 0
+        self.target_x   = msg.x
+        self.target_y   = msg.y
+        self.target_yaw = msg.theta
+        print(msg.x, '|', msg.y, '|', msg.theta)
 
         # END: YOUR CODE HERE
 
@@ -147,10 +153,12 @@ class EL5206_Robot:
         see if there is one that handles the euler-quaternion transformation.
         http://docs.ros.org/en/melodic/api/tf/html/python/transformations.html
         """
+        from tf.transformations import euler_from_quaternion
         # START: YOUR CODE HERE
-        x   = 0
-        y   = 0
-        yaw = 0
+        quat = odom_msg.pose.pose.orientation
+        _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+        x = odom_msg.pose.pose.position.x
+        y = odom_msg.pose.pose.position.y
 
         # END: YOUR CODE HERE
         return (x, y, yaw)
@@ -258,15 +266,61 @@ class EL5206_Robot:
         # START: YOUR CODE HERE
 
         # END: YOUR CODE HERE
-        pass
+        self.printOdomvsGroundTruth()
 
-    
+    def target_tolerance(self, tol_lin=1e-2, tol_ang=0.2):
+        x_tol = abs(self.target_x - self.odom_x) < tol_lin
+        y_tol = abs(self.target_y - self.odom_y) < tol_lin
+        theta_tol = abs(self.target_yaw - self.odom_yaw) < tol_ang
+
+        return x_tol & y_tol & theta_tol 
+
+    def align_and_naivigate(self):
+        if not self.target_reached:
+            theta_0 = atan2(self.target_y-self.odom_y, self.target_x-self.odom_x)
+            ang_diff = theta_0 - self.odom_yaw 
+            rospy.loginfo_once('Inital difference %f', ang_diff)
+
+            while abs(ang_diff) > 0.01:
+                yaw_speed = Twist()
+                yaw_speed.angular.z = ang_diff * self.K_p * 0.7
+                self.vel_pub.publish(yaw_speed) 
+                ang_diff = theta_0 - self.odom_yaw
+                print('odom: ', self.odom_yaw)
+                #rospy.loginfo('Current diff %f', ang_diff)
+            
+            yaw_speed = Twist()
+            yaw_speed.angular.z = 0.0
+            self.vel_pub.publish(yaw_speed) 
+            rospy.loginfo_once('Angular target reached, starting linear movement')
+            
+            time.sleep(2)
+            
+            lin_diff = sqrt((self.odom_x-self.target_x)**2 + (self.odom_y-self.target_y)**2)
+            while abs(lin_diff) > 0.1:
+                lin_speed = Twist()
+                lin_speed.linear.x = max(0, min(lin_diff * self.K_p, 0.3))
+                lin_speed.angular.z = 0
+                self.vel_pub.publish(lin_speed) 
+                lin_diff = sqrt((self.odom_x-self.target_x)**2 + (self.odom_y-self.target_y)**2)
+                rospy.loginfo('pose x=%f,  y=%f', self.odom_x, self.odom_y)  
+
+            lin_speed = Twist()
+            lin_speed.linear.x = 0.0
+            self.vel_pub.publish(lin_speed) 
+            rospy.loginfo_once('Target Reached!')
+            self.target_reached = True
+
     def assignment_2(self):
         # You can use this method to solve the Assignment 2.
         # START: YOUR CODE HERE
+        if self.target_tolerance():
+            rospy.loginfo_once('Waiting for target')
+        else:
+            self.align_and_naivigate()        
 
         # END: YOUR CODE HERE
-        pass
+        rospy.loginfo_once('started node')
 
 
     def assignment_3(self):
@@ -293,7 +347,8 @@ if __name__ == '__main__':
 
     try:
         # Demo function
-        node.dance()
+        while not rospy.is_shutdown():
+            node.assignment_2()
 
     except rospy.ROSInterruptException:
         rospy.logerr("ROS Interrupt Exception! Just ignore the exception!")
