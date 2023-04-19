@@ -19,8 +19,9 @@ import tf2_ros
 import time
 import yaml
 import os
+from tf.transformations import euler_from_quaternion
 
-from geometry_msgs.msg import Twist, Pose2D
+from geometry_msgs.msg import Twist, Pose2D, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 
@@ -47,18 +48,34 @@ class EL5206_Robot:
         self.target_x   = 0.0
         self.target_y   = 0.0
         self.target_yaw = 0.0
-        self.K_p = 0.2
         self.path = rospkg.RosPack().get_path('el5206_example')
-        #os.path.join(os.path.dirname(os.path.abspath(__file__)), '../..')
+
+        self.last_error_linear = 0
+        self.last_error_angular = 0
+        self.accum_error_linear = 0
+        self.accum_error_angular = 0
+
+        self.Kd_linear = 0.1
+        self.Kd_angular = 0.1
+        self.Kp_linear = 1.0
+        self.Kp_angular = 1.5
+        self.Ki_linear = 0.8
+        self.Ki_angular = 1.0
+
+        self._control_rate = rospy.Rate(10)
+        self._pid_timer = rospy.Time.now()
+
+        self.speed_cmd = Twist()
+
         # Extra variable to print odometry
         self.odom_i = 0
         self.target_reached = False
 
         # Subscribers
-        rospy.Subscriber("/odom",               Odometry,  self.odometryCallback)
-        rospy.Subscriber("/ground_truth/state", Odometry,  self.groundTruthCallback)
-        rospy.Subscriber("/scan",               LaserScan, self.scanCallback)
-        rospy.Subscriber("/target_pose",        Pose2D,    self.poseCallback)
+        rospy.Subscriber("/odom",                  Odometry,    self.odometryCallback)
+        rospy.Subscriber("/ground_truth/state",    Odometry,    self.groundTruthCallback)
+        rospy.Subscriber("/scan",                  LaserScan,   self.scanCallback)
+        rospy.Subscriber("/move_base_simple/goal", PoseStamped, self.poseCallback)
 
         # Publishers
         self.vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
@@ -119,10 +136,14 @@ class EL5206_Robot:
         $ rostopic pub /target_pose geometry_msgs/Pose2D '1.0' '2.0' '3.0'
         """
         # START: YOUR CODE HERE
-        self.target_x   = msg.x
-        self.target_y   = msg.y
-        self.target_yaw = msg.theta
-        print(msg.x, '|', msg.y, '|', msg.theta)
+        quat = msg.pose.orientation
+        _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+
+        self.target_x   = msg.pose.position.x
+        self.target_y   = msg.pose.position.y
+        self.target_yaw = yaw
+        self.target_reached = False
+        # print(msg.x, '|', msg.y, '|', msg.theta)
 
         # END: YOUR CODE HERE
 
@@ -153,7 +174,7 @@ class EL5206_Robot:
         see if there is one that handles the euler-quaternion transformation.
         http://docs.ros.org/en/melodic/api/tf/html/python/transformations.html
         """
-        from tf.transformations import euler_from_quaternion
+
         # START: YOUR CODE HERE
         quat = odom_msg.pose.pose.orientation
         _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
@@ -216,6 +237,40 @@ class EL5206_Robot:
             plt.axis('off')
             plt.savefig(self.path+'/results/trajectories.png')
 
+    def plotOdomVsGroundTruth_ass2(self):
+        """
+        Imports a map image and plots the trajectory of the robot according to
+        the Odometry frame and Gazebo's Ground Truth.
+        """
+        if len(self.odom_lst)>0:
+            img = plt.imread(self.path+'/maps/map.pgm')
+            print('Image imported')
+            # Import map YAML (This is a text file with information about the map)
+            with open(self.path+"/maps/map.yaml", 'r') as stream:
+                data = yaml.safe_load(stream)
+                origin = data['origin']
+                resolution = data['resolution']
+                height = img.shape[0]
+
+                odom_arr = np.array(self.odom_lst)
+                gt_arr = np.array(self.gt_lst)
+
+                odom_x_px = ((odom_arr[:,0] - origin[0])/resolution).astype(int)
+                odom_y_px = (height-1+ (origin[1]-odom_arr[:,1])/resolution).astype(int)
+                gt_x_px = ((gt_arr[:,0] - origin[0])/resolution).astype(int)
+                gt_y_px = (height-1+ (origin[1]-gt_arr[:,1])/resolution).astype(int)
+                trgt_x = ((self.target_x - origin[0])/resolution)
+                trgt_y = (height-1+ (origin[1]-self.target_y)/resolution)
+
+                plt.plot(odom_x_px, odom_y_px, color="red", linewidth=1, label='Odometry')
+                plt.plot(gt_x_px, gt_y_px, color="blue", linewidth=1, label='Ground Truth')
+                if (self.target_x != None) and (self.target_y != None):
+                    plt.plot(trgt_x, trgt_y, color="black", marker="x")
+                    plt.legend()
+                    plt.title('Trajectory of the Robot')
+                    # plt.axis('off')
+                    plt.grid()
+                    plt.savefig(self.path+'/results/trajectories_empty_map.png')
 
     def printOdomvsGroundTruth(self):
         """
@@ -261,13 +316,6 @@ class EL5206_Robot:
             time.sleep(1)
 
 
-    def assignment_1(self):
-        # You can use this method to solve the Assignment 1.
-        # START: YOUR CODE HERE
-
-        # END: YOUR CODE HERE
-        self.printOdomvsGroundTruth()
-
     def target_tolerance(self, tol_lin=1e-2, tol_ang=0.2):
         x_tol = abs(self.target_x - self.odom_x) < tol_lin
         y_tol = abs(self.target_y - self.odom_y) < tol_lin
@@ -275,41 +323,113 @@ class EL5206_Robot:
 
         return x_tol & y_tol & theta_tol 
 
-    def align_and_naivigate(self):
+    def orient_to_goal(self, ang_tol=.05):
+        ang_diff = self.target_yaw - self.odom_yaw
+        while abs(ang_diff) > ang_tol:
+            self.speed_cmd.angular.z = ang_diff * self.Kp_angular
+            self.vel_pub.publish(self.speed_cmd) 
+            ang_diff = self.target_yaw - self.odom_yaw
+        
+        self.speed_cmd.angular.z = 0.0
+        self.vel_pub.publish(self.speed_cmd) 
+
+    def align_and_naivigate(self, lin_tol=.2, ang_tol=.02):
         if not self.target_reached:
             theta_0 = atan2(self.target_y-self.odom_y, self.target_x-self.odom_x)
             ang_diff = theta_0 - self.odom_yaw 
-            rospy.loginfo_once('Inital difference %f', ang_diff)
 
-            while abs(ang_diff) > 0.01:
-                yaw_speed = Twist()
-                yaw_speed.angular.z = ang_diff * self.K_p * 0.7
-                self.vel_pub.publish(yaw_speed) 
+            while abs(ang_diff) > ang_tol:
+                self.speed_cmd.angular.z = max(-0.5, min(ang_diff * self.Kp_angular, 0.5))
+                self.vel_pub.publish(self.speed_cmd) 
                 ang_diff = theta_0 - self.odom_yaw
                 print('odom: ', self.odom_yaw)
-                #rospy.loginfo('Current diff %f', ang_diff)
-            
-            yaw_speed = Twist()
-            yaw_speed.angular.z = 0.0
-            self.vel_pub.publish(yaw_speed) 
+
+            self.speed_cmd.angular.z = 0.0
+            self.vel_pub.publish(self.speed_cmd) 
             rospy.loginfo_once('Angular target reached, starting linear movement')
             
-            time.sleep(2)
+            time.sleep(1)
             
             lin_diff = sqrt((self.odom_x-self.target_x)**2 + (self.odom_y-self.target_y)**2)
-            while abs(lin_diff) > 0.1:
+            while abs(lin_diff) > lin_tol:
                 lin_speed = Twist()
-                lin_speed.linear.x = max(0, min(lin_diff * self.K_p, 0.3))
-                lin_speed.angular.z = 0
+                lin_speed.angular.z = 0.0
+                lin_speed.linear.x = max(0, min(lin_diff * self.Kp_linear, 0.3))
                 self.vel_pub.publish(lin_speed) 
                 lin_diff = sqrt((self.odom_x-self.target_x)**2 + (self.odom_y-self.target_y)**2)
-                rospy.loginfo('pose x=%f,  y=%f', self.odom_x, self.odom_y)  
+                
 
             lin_speed = Twist()
             lin_speed.linear.x = 0.0
             self.vel_pub.publish(lin_speed) 
+            self.orient_to_goal()
+
             rospy.loginfo_once('Target Reached!')
             self.target_reached = True
+
+        rospy.loginfo_once('Target Reached!')
+
+    def navigate_pid(self):
+        if not self.target_reached:
+            ang_error = atan2(self.target_y-self.odom_y, self.target_x-self.odom_x) - self.odom_yaw 
+            lin_error = sqrt((self.odom_x-self.target_x)**2 + (self.odom_y-self.target_y)**2)
+
+            self.speed_cmd = Twist()
+            while True:
+    
+                self.accum_error_linear += lin_error
+                self.accum_error_angular += ang_error
+                
+                # Update last error
+                self.last_error_linear = lin_error
+                self.last_error_angular = ang_error
+                
+                dt = 1 / 10.0
+
+                delta_error_linear =  self.last_error_linear / dt
+                delta_error_angular = self.last_error_angular / dt
+                accum_error_linear =  self.last_error_linear * dt
+                accum_error_angular = self.last_error_angular * dt
+
+                # Calculate control commands using PD controller
+                linear_speed = self.Kp_linear * lin_error + \
+                               self.Kd_linear * delta_error_linear +\
+                               self.Ki_linear * accum_error_linear
+
+                angular_speed = self.Kp_angular * ang_error +\
+                                self.Kd_angular * delta_error_angular +\
+                                self.Ki_angular * accum_error_angular
+
+                ang_error = atan2(self.target_y-self.odom_y, self.target_x-self.odom_x) - self.odom_yaw 
+                lin_error = sqrt((self.odom_x-self.target_x)**2 + (self.odom_y-self.target_y)**2)
+
+                # Publish control commands
+                self.speed_cmd = Twist()
+                self.speed_cmd.linear.x = max(0, min(linear_speed, 0.3))
+                self.speed_cmd.angular.z = max(-1, min(angular_speed, 1))
+
+                self.vel_pub.publish(self.speed_cmd)
+                self._control_rate.sleep()
+
+                self._pid_timer = rospy.Time.now() # update timer
+
+                if abs(lin_error) < 0.05: break
+            
+            self.speed_cmd.linear.x  = 0.0
+            self.speed_cmd.angular.z = 0.0
+            self.vel_pub.publish(self.speed_cmd)
+            self.orient_to_goal()
+
+            self.target_reached = True
+        rospy.loginfo_once('Target Reached!')
+
+
+    def assignment_1(self):
+        # You can use this method to solve the Assignment 1.
+        # START: YOUR CODE HERE
+
+        # END: YOUR CODE HERE
+        self.printOdomvsGroundTruth()
 
     def assignment_2(self):
         # You can use this method to solve the Assignment 2.
@@ -317,7 +437,9 @@ class EL5206_Robot:
         if self.target_tolerance():
             rospy.loginfo_once('Waiting for target')
         else:
-            self.align_and_naivigate()        
+            self.navigate_pid()
+            
+                    
 
         # END: YOUR CODE HERE
         rospy.loginfo_once('started node')
@@ -349,6 +471,7 @@ if __name__ == '__main__':
         # Demo function
         while not rospy.is_shutdown():
             node.assignment_2()
+            node.plotOdomVsGroundTruth_ass2()
 
     except rospy.ROSInterruptException:
         rospy.logerr("ROS Interrupt Exception! Just ignore the exception!")
