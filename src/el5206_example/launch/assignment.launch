@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="gui"        default="false"/>
+    <arg name="assignment" default="2" />
+    <arg name="nav_mode"  default="2"/>
+    
+    <param name="assignment" value="$(arg assignment)"/>
+    <param name="nav_mode"   value="$(arg nav_mode)"/>
+        
+    <group if="$(eval assignment == 1)">
+        <include file="$(find el5206_gazebo)/launch/el5206_house.launch" /> 
+    </group>
+
+    <group if="$(eval assignment == 2)">
+        <include file="$(find el5206_gazebo)/launch/el5206_empty_world.launch" >
+            <arg name="gui" value="$(arg gui)"/>
+        </include>        
+    </group>
+
+    <node name="main" pkg="el5206_example" type="el5206_main.py" output="screen" /
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find el5206_example)/config/rviz.rviz"/>
+</launch>
