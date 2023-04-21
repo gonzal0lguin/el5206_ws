@@ -466,7 +466,7 @@ class EL5206_Robot:
     def assignment_2(self):
         # You can use this method to solve the Assignment 2.
         if self.target_reached:
-            rospy.loginfo_once('Waiting fro target!')
+            rospy.loginfo_once('Waiting for target!')
         else:
             if self.nav_mode == 1:
                 self.align_and_naivigate()
@@ -514,7 +514,7 @@ if __name__ == '__main__':
 
             elif node.assignment == 2:
                 node.assignment_2()
-                if len(node.target_list) > 0: # plot after 4 commanded poses
+                if len(node.target_list) > 3: # plot after 4 commanded poses
                     node.plotOdomVsGroundTruth_ass2()
                     print(node.target_reached_pose)
 

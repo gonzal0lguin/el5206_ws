@@ -2,7 +2,8 @@
 <launch>
     <arg name="gui"        default="false"/>
     <arg name="assignment" default="2" />
-    <arg name="nav_mode"  default="2"/>
+    <arg name="nav_mode"   default="2"/>
+    <arg name="use_rviz"   default="true"/>
     
     <param name="assignment" value="$(arg assignment)"/>
     <param name="nav_mode"   value="$(arg nav_mode)"/>
@@ -17,6 +18,8 @@
         </include>        
     </group>
 
-    <node name="main" pkg="el5206_example" type="el5206_main.py" output="screen" /
-    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find el5206_example)/config/rviz.rviz"/>
+    <node name="main" pkg="el5206_example" type="el5206_main.py" output="screen" />
+    <group if="$(arg use_rviz)">
+        <node name="rviz" pkg="rviz" type="rviz" args="-d $(find el5206_example)/config/rviz.rviz"/>
+    </group>
 </launch>
