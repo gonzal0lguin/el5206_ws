@@ -18,8 +18,7 @@ import tf
 import tf2_ros
 import time
 import yaml
-import scipy
-from tf.transformations import euler_from_quaternion
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
 
 from geometry_msgs.msg import Twist, Pose2D, PoseStamped
 from nav_msgs.msg import Odometry
@@ -49,6 +48,7 @@ class EL5206_Robot:
         self.target_y   = 0.0
         self.target_yaw = 0.0
         self.target_list = []
+        self.scans = []
         self.target_reached_pose = [] # [xodom, yodom, todom, xgt, ygt, tgt]
         self.path = rospkg.RosPack().get_path('el5206_example')
 
@@ -59,13 +59,21 @@ class EL5206_Robot:
 
         self.Kd_linear = 0.3
         self.Kd_angular = 0.1
-        self.Kp_linear = 1.0
-        self.Kp_angular = 0.8
-        self.Ki_linear = 0.8
+
+        self.Kp_linear = .70
+        self.Kp_angular = 1
+        
+        self.Ki_linear  = 0.3
         self.Ki_angular = 1.0
 
-        self._control_rate = rospy.Rate(10)
-        self._pid_timer = rospy.Time.now()
+        # Path planning constants
+        self.Krep = 8e-3 #2e-3
+        self.Patt = 8e-1 #8e-3
+        self.Rmax = 0.8  #1.2
+        self.robot_radius = 0.15
+        self.img_name = 'ass4_long4'
+
+        self._control_rate = rospy.Rate(20)
 
         self.speed_cmd = Twist()
 
@@ -84,6 +92,7 @@ class EL5206_Robot:
 
         # Timer
         self.update_timer = rospy.Timer( rospy.Duration(.5), self.timerCallback )
+        self.save_scans_timer = rospy.Timer( rospy.Duration(4), self.LaserTimer )
 
         # Parameters
         self.assignment = rospy.get_param("assignment")
@@ -151,7 +160,6 @@ class EL5206_Robot:
         self.target_yaw = yaw
         self.target_list.append([self.target_x, self.target_y, self.target_yaw])
         self.target_reached = False
-
         # END: YOUR CODE HERE
 
 
@@ -165,7 +173,23 @@ class EL5206_Robot:
         if self.odom_x is not None and self.gt_x is not None and len(self.odom_lst)<self.poses_to_save:
             self.odom_lst.append( (self.odom_x, self.odom_y) )
             self.gt_lst.append( (self.gt_x, self.gt_y) )
-                
+    
+    def LaserTimer(self,event):
+        """
+        This timer function will save the odometry and Ground Truth values
+        for the position in the self.odom_lst and self.gt_lst so you can
+        compare them afterwards. It is updated every 1 second for 300 poses 
+        (about 5 mins).
+        """
+        if self.currentScan is not None:
+            ranges = np.array(self.currentScan.ranges)
+            a_min  = self.currentScan.angle_min
+            a_inc  = self.currentScan.angle_increment
+            angles = np.array([a_min + i*a_inc for i in range(len(ranges))])
+
+            x = ranges * np.cos(angles + self.odom_yaw) + self.odom_x
+            y = ranges * np.sin(angles + self.odom_yaw) + self.odom_y
+            self.scans.append(np.stack([x, y], axis=1))
 
     """
     Now let's define some auxiliary methods. These are used to solve the 
@@ -245,7 +269,7 @@ class EL5206_Robot:
             plt.axis('off')
             plt.savefig(self.path+'/results/trajectories.png')
 
-    def plotOdomVsGroundTruth_ass2(self):
+    def plotOdomVsGroundTruth_ass2(self, name):
         """
         Imports a map image and plots the trajectory of the robot according to
         the Odometry frame and Gazebo's Ground Truth.
@@ -254,41 +278,26 @@ class EL5206_Robot:
             img = plt.imread(self.path+'/maps/map.pgm')
             print('Image imported')
             # Import map YAML (This is a text file with information about the map)
-            with open(self.path+"/maps/map.yaml", 'r') as stream:
-                data = yaml.safe_load(stream)
-                origin = data['origin']
-                resolution = data['resolution']
-                height = img.shape[0]
 
-                odom_arr = np.array(self.odom_lst)
-                gt_arr = np.array(self.gt_lst)
-                target_arr = np.array(self.target_list)
-                final_poses_odom = np.array([x['odom'] for x in self.target_reached_pose])
-                final_poses_gt = np.array([x['gt'] for x in self.target_reached_pose])
+            odom_arr = np.array(self.odom_lst)
+            gt_arr = np.array(self.gt_lst)
+            target_arr = np.array(self.target_list)
 
-                odom_x_px = ((odom_arr[:,0] - origin[0])/resolution)#.astype(int)
-                odom_y_px = (height-1+ (origin[1]-odom_arr[:,1])/resolution)#.astype(int)
-                gt_x_px = ((gt_arr[:,0] - origin[0])/resolution)#.astype(int)
-                gt_y_px = (height-1+ (origin[1]-gt_arr[:,1])/resolution)#.astype(int)
-                trgt_x = ((target_arr[:,0] - origin[0])/resolution)
-                trgt_y = (height-1+ (origin[1]-target_arr[:,1])/resolution)
-                final_pose_gt_x = ((final_poses_gt[:,0] - origin[0])/resolution)
-                final_pose_gt_y = (height-1+ (origin[1]-final_poses_gt[:,1])/resolution)
-                final_pose_odom_x = ((final_poses_odom[:,0] - origin[0])/resolution)
-                final_pose_odom_y = (height-1+ (origin[1]-final_poses_odom[:,1])/resolution)
 
-                plt.plot(odom_x_px, odom_y_px, color="red", linewidth=1, label='Odometry')
-                plt.plot(gt_x_px, gt_y_px, color="blue", linewidth=1, label='Ground Truth')
-                if len(self.target_list) > 0:
-                    plt.annotate('Start', (gt_x_px[0], gt_y_px[0]), fontsize=12, va='top')
-                    plt.scatter(trgt_x, trgt_y, color="black", marker="x")
-                    plt.scatter(final_pose_gt_x, final_pose_gt_y, color="blue", marker="x")
-                    plt.scatter(final_pose_odom_x, final_pose_odom_y, color="red", marker="x")
-                    plt.legend()
-                    plt.title('Trajectory of the Robot')
-                    plt.axis('off')
-                    plt.grid()
-                    plt.savefig(self.path+'/results/as2plot.png')
+            plt.plot(odom_arr[:, 0], odom_arr[:, 1], color="red", linewidth=1, label='Odometry')
+            plt.plot(gt_arr[:, 0], gt_arr[:, 1], color="blue", linewidth=1, label='Ground Truth')
+            if len(self.target_list) > 0:
+                plt.annotate('Start', (gt_arr[0, 0], gt_arr[0, 1]), fontsize=12, va='top')
+                plt.scatter(target_arr[:, 0], target_arr[:, 1], color="black", marker="x")
+                #plt.scatter(final_pose_gt_x, final_pose_gt_y, color="blue", marker="x")
+                #plt.scatter(final_pose_odom_x, final_pose_odom_y, color="red", marker="x")
+                for scan in self.scans:
+                    plt.scatter(scan[:, 0], scan[:, 1], s=5)
+                plt.legend()
+                plt.title('Trajectory of the Robot')
+                plt.axis('off')
+                plt.grid()
+                plt.savefig(self.path+'/results/{}.png'.format(name))
 
     def printOdomvsGroundTruth(self):
         """
@@ -297,41 +306,6 @@ class EL5206_Robot:
         if self.odom_x is not None and self.gt_x is not None:
             print("                  Odometry         -        GroundTruth")
             print("(x,y,yaw):  (%6.2f,%6.2f,%6.2f) - (%6.2f,%6.2f,%6.2f)"%(self.odom_x,self.odom_y,self.odom_yaw,self.gt_x,self.gt_y,self.gt_yaw))
-
-
-    def dance(self, timeout=300):
-        """
-        Demo function. Moves the robot with the vel_pub Publisher.
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout and not rospy.is_shutdown():
-            # Move forward
-            twist_msg = Twist()
-            twist_msg.linear.x  = 0.2
-            twist_msg.angular.z = 0.0
-            self.vel_pub.publish(twist_msg)
-            time.sleep(1)
-
-            # Move backward
-            twist_msg = Twist()
-            twist_msg.linear.x  = -0.2
-            twist_msg.angular.z = 0.0
-            self.vel_pub.publish(twist_msg)
-            time.sleep(1)
-
-            # Turn left
-            twist_msg = Twist()
-            twist_msg.linear.x  = 0.0
-            twist_msg.angular.z = 0.2
-            self.vel_pub.publish(twist_msg)
-            time.sleep(1)
-
-            # Turn right
-            twist_msg = Twist()
-            twist_msg.linear.x  = 0.0
-            twist_msg.angular.z = -0.2
-            self.vel_pub.publish(twist_msg)
-            time.sleep(1)
 
 
     def target_tolerance(self, tol_lin=1e-2, tol_ang=0.2):
@@ -399,6 +373,7 @@ class EL5206_Robot:
         self.save_target_reached_pose()
         rospy.loginfo_once('Target Reached!')
 
+
     def navigate_pid(self):
         if not self.target_reached:
             ang_error = atan2(self.target_y-self.odom_y, self.target_x-self.odom_x) - self.odom_yaw 
@@ -440,8 +415,6 @@ class EL5206_Robot:
                 self.vel_pub.publish(self.speed_cmd)
                 self._control_rate.sleep()
 
-                self._pid_timer = rospy.Time.now() # update timer
-
                 accel_factor += 0.1
                 if accel_factor > 1.0: accel_factor = 1.0
                 if abs(lin_error) < 0.05: break
@@ -455,6 +428,141 @@ class EL5206_Robot:
         
         self.save_target_reached_pose()
         rospy.loginfo_once('Target Reached!')
+
+    ############################################
+    ########### ASSIGNMENT 4 FUNCTIONS #########
+    ############################################
+    
+    def calc_potential(self, P_att, P_rep):
+        X_p, Y_p = P_att + P_rep
+
+        P = np.linalg.norm(P_att + P_rep)
+        gamma_p = atan2(Y_p, X_p)
+
+        return np.array([P, gamma_p])
+        
+    def calc_attractive_force(self):
+        """
+        Calculates the components of the attractive force to the goal.
+        returns np.ndarray([X_att, Y_att])
+        """
+
+        R = sqrt((self.target_x - self.odom_x) ** 2 + (self.target_y - self.odom_y) ** 2)
+
+        if R < self.Rmax:
+            return np.array([self.target_x - self.odom_x, self.target_y - self.odom_y]) * self.Patt
+        
+        return np.array([self.target_x - self.odom_x, self.target_y - self.odom_y])\
+                * self.Patt * self.Rmax / R
+
+    def calc_repulsive_force(self):
+        if self.currentScan is None:
+            return 0, 0
+
+        ranges = np.array(self.currentScan.ranges)
+        a_min  = self.currentScan.angle_min
+        a_inc  = self.currentScan.angle_increment
+        angles = np.array([a_min + i*a_inc for i in range(len(ranges))])
+
+        F = np.sum(np.cos(angles) / ranges ** 2)
+        S = np.sum(np.sin(angles) / ranges ** 2)
+
+        theta_rob = self.odom_yaw #atan2(self.odom_y, self.odom_x) #self.odomsin_yaw
+
+        X_rep = -self.Krep * (F * np.cos(theta_rob) - S * np.sin(theta_rob)) 
+        Y_rep = -self.Krep * (F * np.sin(theta_rob) + S * np.cos(theta_rob))
+
+        print('rep', X_rep, Y_rep)
+
+        return np.array([X_rep, Y_rep])
+
+
+    def follow_path(self):
+        if not self.target_reached:
+            accel_factor = 0.2
+
+            while True:
+                X_p, Y_p = self.calc_potential(
+                        self.calc_attractive_force(),
+                        self.calc_repulsive_force())
+
+                ang_error = atan2(Y_p - self.odom_y, X_p - self.odom_x)
+                lin_error = sqrt((self.odom_x-X_p)**2 + (self.odom_y-Y_p)**2)
+                
+                # print(ang_error, lin_error)
+
+                dt = 1 / 10.0
+
+                # Calculate control commands using PD controller
+                linear_speed = self.Kp_linear * lin_error #+ \
+                            #    self.Kd_linear * delta_error_linear +\
+                            #    self.Ki_linear * accum_error_linear
+
+                angular_speed = self.Kp_angular * ang_error #+\
+                                # self.Kd_angular * delta_error_angular +\
+                                # self.Ki_angular * accum_error_angular
+
+
+                # Publish control commands
+                self.speed_cmd.linear.x = max(0, min(linear_speed, 0.3)) * accel_factor
+                self.speed_cmd.angular.z = max(-1, min(angular_speed, 1))
+
+                self.vel_pub.publish(self.speed_cmd)
+
+                accel_factor += 0.1
+                if accel_factor > 1.0: accel_factor = 1.0
+                if abs(lin_error) < 0.05: break
+                
+                self._control_rate.sleep()
+            
+            self.speed_cmd.linear.x  = 0.0
+            self.speed_cmd.angular.z = 0.0
+            self.vel_pub.publish(self.speed_cmd)
+
+        self.target_reached = True
+        
+
+        rospy.loginfo_once('Target Reached!')
+
+    def potential_path_planner(self):
+        seq=0
+        if not self.target_reached:
+            while True:
+                rep = self.calc_repulsive_force()
+                att = self.calc_attractive_force()
+                
+                P, gamma = self.calc_potential(
+                                att,
+                                rep)
+                
+                # seguir la trayectoria con el PID
+                print(gamma)
+
+                ang = (gamma - self.odom_yaw) * self.Kp_angular
+
+                self.speed_cmd.linear.x  = max(0, min(P * self.Kp_linear, 0.3))
+                self.speed_cmd.angular.z = max(-1, min(ang, 1))
+
+                print(self.speed_cmd.linear.x, self.speed_cmd.angular.z)
+
+                self.vel_pub.publish(self.speed_cmd)
+
+                lin_error = sqrt((self.target_x-self.odom_x) ** 2 + (self.target_y - self.odom_y) ** 2)
+
+                if abs(lin_error)<0.2: break
+
+                self._control_rate.sleep()
+            self.speed_cmd.linear.x  = 0
+            self.speed_cmd.angular.z = 0
+
+            self.vel_pub.publish(self.speed_cmd)
+            self.save_target_reached_pose()
+            self.target_reached = True
+
+        
+    ############################################
+    ########### ASSIGNMENT 4 FUNCTIONS #########
+    ############################################
 
     def assignment_1(self):
         # You can use this method to solve the Assignment 1.
@@ -485,19 +593,14 @@ class EL5206_Robot:
 
     def assignment_3(self):
         # You can use this method to solve the Assignment 3.
-        # START: YOUR CODE HERE
-
-        # END: YOUR CODE HERE
-        pass
+        
+        time.sleep(5)
+        self.saveLaser()
 
 
     def assignment_4(self):
         # You can use this method to solve the Assignment 4.
-        # START: YOUR CODE HERE
-
-        # END: YOUR CODE HERE
-        pass
-
+        node.potential_path_planner()
 
 
 
@@ -517,119 +620,18 @@ if __name__ == '__main__':
                 if len(node.target_list) > 3: # plot after 4 commanded poses
                     node.plotOdomVsGroundTruth_ass2()
                     print(node.target_reached_pose)
+            
+            elif node.assignment == 3:
+                node.assignment_3()
+            
+            elif node.assignment == 4:
+                if node.target_reached:
+                    rospy.loginfo_once('Waiting for target!')
+                else:
+                    node.assignment_4()
+                    node.plotOdomVsGroundTruth_ass2(node.img_name)
+            
 
     except rospy.ROSInterruptException:
         rospy.logerr("ROS Interrupt Exception! Just ignore the exception!")
 
-
-
-# 4 poses align
-# [{'gt': [0.0, 0.0, 0.0], 'odom': [0.0, 0.0, 0.0]}, 
-#  {'gt': [0.972741301463797, -0.944904694670093, -0.06019041160814785], 'odom': [0.9661236356923724, -0.9455674004915796, -0.037284166647721675]}, 
-#  {'gt': [0.0638752049792857, -1.9675536295702085, -1.7650817307960371], 'odom': [0.06260478450033262, -1.9578540393513402, -1.6091674500051463]}, 
-#  {'gt': [2.1002873845970353, -1.5037437117888826, -3.1399873028044523], 'odom': [1.9205654846206968, -1.018629449940068, -3.088699380838051]}, 
-#  {'gt': [1.4763395344576378, 0.5669224171728682, -1.5618808157119104], 'odom': [1.0125781542805423, 0.9276497273782032, -1.5221716137466073]}]
-
-# 4 poses pid
-# [{'gt': [0.0, 0.0, 0.0], 'odom': [0.0, 0.0, 0.0]}, 
-#  {'gt': [1.046203890555529, -1.0127632209743929, -0.06108917375359547], 'odom': [1.0316864510300536, -1.021070571636431, -0.03923527912570159]},
-#  {'gt': [0.013389147951154836, -2.0605187301333476, -1.619697737748858], 'odom': [-0.026059398259143916, -2.027334617187469, -1.6201267379855298]}, 
-#  {'gt': [2.0847140365105727, -1.090169774600336, 3.0006175633641723], 'odom': [2.0185432296412222, -0.9895181186604312, 3.0837439637079327]}, 
-#  {'gt': [1.30304403471458, 0.9939360239485284, -1.6747104677573026], 'odom': [1.0089786458894154, 1.0012974275212045, -1.5232364851015172]}]
-
-# 1 pose pid
-# [{'gt': [0.0, 0.0, 0.0], 'odom': [0.0, 0.0, 0.0]}, 
-# {'gt': [5.1074647528645185, 4.8298668533337015, -3.013368287633109], 'odom': [4.955478873725402, 4.984966561396401, -3.0793280009633817]}]
-
-# 1 pose align
-# [{'gt': [-1.6800390719396915e-05, 1.7292361372398835e-08, -0.00015825365653390977], 'odom': [5.182277205707567e-07, 6.353407657696101e-13, 2.4053449324382095e-06]}, 
-# {'gt': [5.002981889938614, 4.8882988841956605, -3.0000113184166852], 'odom': [4.969679475664027, 4.92051467201697, -3.091681285823929]}]
-
-# pid behind
-# [{'gt': [-1.8390619420127242e-06, 1.5327765125637285e-08, -2.6412658439818936e-06], 'odom': [-6.73054368339055e-08, -1.4035700641099433e-14, -8.964924729186012e-07]}, 
-# {'gt': [-1.022399903488259, -1.0161467849756942, -0.07041151932337295], 'odom': [-1.0217124363250503, -1.0007880562627045, -0.04803158576736221]}]
-
-#align behind
-# [{'gt': [-1.683575801257782e-05, 1.6821103875446236e-08, -0.00015819987407878847], 'odom': [4.192092527584849e-07, 3.9433447277732107e-13, 2.471171728378354e-06]}, 
-# {'gt': [-0.9268086310716894, -0.9615817906770362, -0.11426815667685766], 'odom': [-0.9403783302994148, -0.9520732613861965, -0.05187615506841659]}]
-
-
-# (x,y,yaw):  (  3.01, -2.22,  3.14) - (  3.56, -1.82, -2.53)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  2.59, -2.20,  3.01) - (  3.20, -2.05, -2.68)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  2.14, -2.05,  2.78) - (  2.78, -2.19, -2.87)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  1.89, -1.95,  2.41) - (  2.49, -2.26,  3.07)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  1.63, -1.61,  2.19) - (  2.11, -2.15,  2.82)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  1.17, -0.95,  2.19) - (  1.33, -1.89,  2.82)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  0.76, -0.38,  2.17) - (  0.65, -1.66,  2.79)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  0.73, -0.30,  1.48) - (  0.57, -1.60,  2.09)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  0.84,  0.35,  1.39) - (  0.27, -0.99,  2.01)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  0.99,  1.17,  1.39) - ( -0.09, -0.23,  2.01)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  1.14,  2.03,  1.39) - ( -0.45,  0.53,  2.01)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  1.28,  2.79,  1.37) - ( -0.77,  1.22,  1.99)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  1.29,  2.85,  2.15) - ( -0.80,  1.28,  2.70)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  1.00,  3.22,  2.24) - ( -1.26,  1.39,  2.90)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  0.92,  3.30,  2.88) - ( -1.35,  1.41, -2.69)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  (  0.24,  3.50,  2.85) - ( -2.01,  1.11, -2.72)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -0.65,  3.77,  2.85) - ( -2.86,  0.73, -2.72)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -1.54,  4.04,  2.85) - ( -3.66,  0.37, -2.72)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -2.40,  4.30,  2.85) - ( -4.54, -0.02, -2.73)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -2.83,  4.42,  2.88) - ( -4.94, -0.18, -2.78)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -3.23,  4.53, -3.00) - ( -5.32, -0.32, -2.37)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -3.51,  4.34, -2.54) - ( -5.44, -0.66, -1.93)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -3.70,  4.21, -1.74) - ( -5.52, -0.84, -1.20)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -3.70,  4.21, -0.41) - ( -5.53, -0.84,  0.05)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -3.69,  4.22,  0.81) - ( -5.53, -0.83,  1.33)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -3.03,  4.89,  0.78) - ( -5.29,  0.05,  1.31)
-# Image imported
-#                   Odometry         -        GroundTruth
-# (x,y,yaw):  ( -2.64,  5.23,  0.62) - ( -5.14,  0.58,  1.20)

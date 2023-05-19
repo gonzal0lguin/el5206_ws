@@ -12,10 +12,20 @@
         <include file="$(find el5206_gazebo)/launch/el5206_house.launch" /> 
     </group>
 
+    <group if="$(eval assignment == 3)">
+        <include file="$(find el5206_gazebo)/launch/el5206_house.launch" /> 
+    </group>
+
     <group if="$(eval assignment == 2)">
         <include file="$(find el5206_gazebo)/launch/el5206_empty_world.launch" >
             <arg name="gui" value="$(arg gui)"/>
         </include>        
+    </group>
+
+    <group if="$(eval assignment == 4)">
+        <include file="$(find el5206_gazebo)/launch/el5206_empty_world.launch">
+            <arg name="gui" value="$(arg gui)"/>
+        </include>
     </group>
 
     <node name="main" pkg="el5206_example" type="el5206_main.py" output="screen" />
